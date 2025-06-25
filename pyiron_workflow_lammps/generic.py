@@ -94,8 +94,8 @@ def shell(
     Returns:
         ShellOutput: Object containing stdout, stderr, and return code.
     """
-    curr_dir = os.getcwd()
-    os.chdir(working_directory)
+    # curr_dir = os.getcwd()
+    # os.chdir(working_directory)
     if environment is None:
         environment = {}
     if arguments is None:
@@ -115,7 +115,7 @@ def shell(
     output.stdout = proc.stdout
     output.stderr = proc.stderr
     output.return_code = proc.returncode
-    os.chdir(curr_dir)
+    # os.chdir(curr_dir)
     return output
 
 @Workflow.wrap.as_function_node("line_found")
@@ -171,6 +171,8 @@ def create_WorkingDirectory(working_directory: str,
             )
         else:
             logger.info(f"Directory '{working_directory}' already exists. Existing files will not be overwritten.")
+            
+    print(working_directory)
     return working_directory
     
 @Workflow.wrap.as_function_node("working_directory")
