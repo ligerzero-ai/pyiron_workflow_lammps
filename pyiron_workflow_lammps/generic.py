@@ -172,7 +172,6 @@ def create_WorkingDirectory(working_directory: str,
         else:
             logger.info(f"Directory '{working_directory}' already exists. Existing files will not be overwritten.")
             
-    print(working_directory)
     return working_directory
     
 @Workflow.wrap.as_function_node("working_directory")

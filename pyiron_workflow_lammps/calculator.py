@@ -84,7 +84,7 @@ def lammps_calculator_node(working_directory: str,
     from pyiron_workflow_lammps.lammps import get_structure_species_lists
     species_lists = get_structure_species_lists(lammps_data_filepath = os.path.join(working_directory, lmp_input.read_data_file),
                                                              lammps_dump_filepath = os.path.join(working_directory, lmp_input.dump_filename))
-    np.unique(structure.get_chemical_symbols())
+    # np.unique(structure.get_chemical_symbols())
     lammps_output = lammps_output["lammps_output"]
     atoms, final_results, converged = get_calculator_outputs_from_lammps_node_output.node_function(lammps_output,
                                                                                working_directory = working_directory,
