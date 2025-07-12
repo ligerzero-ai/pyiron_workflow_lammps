@@ -31,13 +31,20 @@ class LammpsInput:
     dump_every: int = 10
     dump_filename: str = "dump.out"
     thermo_style_fields: Sequence[str] = field(
-        default_factory=lambda: ("step", "temp", "pe", "etotal",
-                                 "pxx", "pxy", "pxz", "pyy", "pyz", "pzz", "vol")
+        default_factory=lambda: (
+            "step", "temp", "pe", "etotal",
+            "pxx", "pxy", "pxz", "pyy", "pyz", "pzz", "vol"
+        )
     )
     thermo_format: str = "%20.15g"
     thermo_every: int = 10
     min_style: str = "cg"
-    minimize_params: Tuple[float, float, int, int] = (0, 0.01, 1000000, 1000000)
+
+    # Individual minimize parameters
+    etol: float = 0.0        # energy tolerance
+    ftol: float = 0.01       # force tolerance
+    maxiter: int = 1_000_000 # maximum iterations
+    maxeval: int = 1_000_000 # maximum force evaluations
 
     def generate(self) -> str:
         # If user provided a raw script, warn and return it directly:
@@ -64,10 +71,10 @@ class LammpsInput:
             f"pair_coeff {self.pair_coeff[0]} {self.pair_coeff[1]} "
             f"{self.pair_coeff[2]} {self.pair_coeff[3]}",
             "",
-            "# per‐atom potential energy",
+            "# per-atom potential energy",
             f"compute {self.compute_id} all pe/atom",
             "",
-            f"# dump every {self.dump_every} steps: coords, forces, velocities, AND per‐atom energy",
+            f"# dump every {self.dump_every} steps: coords, forces, velocities, AND per-atom energy",
             f"dump 1 all custom {self.dump_every} {self.dump_filename} "
             f"id type xsu ysu zsu fx fy fz vx vy vz c_{self.compute_id}",
             (
@@ -84,8 +91,8 @@ class LammpsInput:
             f"min_style   {self.min_style}",
             (
                 "minimize    "
-                f"{self.minimize_params[0]} {self.minimize_params[1]} "
-                f"{self.minimize_params[2]} {self.minimize_params[3]}"
+                f"{self.etol} {self.ftol} "
+                f"{self.maxiter} {self.maxeval}"
             ),
         ]
         return textwrap.dedent("\n".join(lines))
