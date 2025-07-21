@@ -96,6 +96,7 @@ def shell(
     """
     # curr_dir = os.getcwd()
     # os.chdir(working_directory)
+    print(working_directory)
     if environment is None:
         environment = {}
     if arguments is None:
@@ -166,7 +167,7 @@ def create_WorkingDirectory(working_directory: str,
         logger.info(f"made directory '{working_directory}'")
     else:
         if not quiet:
-            warnings.warn(
+            logger.warning(
                 f"Directory '{working_directory}' already exists. Existing files may be overwritten."
             )
         else:

@@ -92,3 +92,30 @@ def lammps_calculator_node(working_directory: str,
                                                                                lammps_log_filepath = lammps_log_filepath,
                                                                                convergence_printout = lammps_log_convergence_printout)
     return atoms, final_results, converged
+
+def lammps_engine_node(working_directory: str,
+                            structure: Atoms,
+                            lammps_engine: LammpsEngine,
+                            
+                            # Don't offer the parsing interface because we must use the pyiron_lammps parser for knowledge on how to parse the energies/forces/stresses
+                            # lammps_parser_function: Callable[..., Any] | None = None,
+                            # lammps_parser_args: dict[str, Any] = {},
+                           ):
+    
+    lammps_output = lammps_job(working_directory = working_directory,
+                                structure = structure,
+                                lmp_input = lmp_input,
+                                input_filename = input_filename,
+                                potential_elements = potential_elements,
+                                command = command).run()
+    from pyiron_workflow_lammps.lammps import get_structure_species_lists
+    species_lists = get_structure_species_lists(lammps_data_filepath = os.path.join(working_directory, lmp_input.read_data_file),
+                                                             lammps_dump_filepath = os.path.join(working_directory, lmp_input.dump_filename))
+    # np.unique(structure.get_chemical_symbols())
+    lammps_output = lammps_output["lammps_output"]
+    atoms, final_results, converged = get_calculator_outputs_from_lammps_node_output.node_function(lammps_output,
+                                                                               working_directory = working_directory,
+                                                                               species_lists = species_lists,
+                                                                               lammps_log_filepath = lammps_log_filepath,
+                                                                               convergence_printout = lammps_log_convergence_printout)
+    return atoms, final_results, converged
