@@ -3,102 +3,12 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import os
 import textwrap
 import warnings
-import logging
-
+import numpy as np
 from ase import Atoms
 import pyiron_workflow as pwf
 from pyiron_workflow_lammps.generic import shell, create_WorkingDirectory
 from pyiron_lammps import parse_lammps_output_files, write_lammps_structure
-
-
-logger = logging.getLogger(__name__)
-
-@dataclass
-class LammpsInput:
-    # If raw_script is set, it will override everything else:
-    raw_script: Optional[str] = None
-
-    units: str = "metal"
-    dimension: int = 3
-    boundary: Union[str, Tuple[str, str, str]] = ("p", "p", "p")
-    atom_style: str = "atomic"
-    read_data_file: str = "lammps.data"
-    pair_style: str = "grace"
-    pair_coeff: Tuple[str, str, str, str] = field(
-        default_factory=lambda: ("*", "*", "/path/to/model", "Fe")
-    )
-    compute_id: str = "eng"
-    dump_every: int = 10
-    dump_filename: str = "dump.out"
-    thermo_style_fields: Sequence[str] = field(
-        default_factory=lambda: (
-            "step", "temp", "pe", "etotal",
-            "pxx", "pxy", "pxz", "pyy", "pyz", "pzz", "vol"
-        )
-    )
-    thermo_format: str = "%20.15g"
-    thermo_every: int = 10
-    min_style: str = "cg"
-
-    # Individual minimize parameters
-    etol: float = 0.0        # energy tolerance
-    ftol: float = 0.01       # force tolerance
-    maxiter: int = 1_000_000 # maximum iterations
-    maxeval: int = 1_000_000 # maximum force evaluations
-
-    def generate(self) -> str:
-        # If user provided a raw script, warn and return it directly:
-        if self.raw_script is not None:
-            warnings.warn(
-                "Raw LAMMPS script provided; all other dataclass fields will be ignored.",
-                UserWarning
-            )
-            return self.raw_script
-
-        # normalize boundary
-        b = self.boundary
-        boundary_str = b if isinstance(b, str) else " ".join(b)
-
-        lines = [
-            f"units {self.units}",
-            f"dimension {self.dimension}",
-            f"boundary {boundary_str}",
-            f"atom_style {self.atom_style}",
-            "",
-            f"read_data {self.read_data_file}",
-            "",
-            f"pair_style {self.pair_style}",
-            f"pair_coeff {self.pair_coeff[0]} {self.pair_coeff[1]} "
-            f"{self.pair_coeff[2]} {self.pair_coeff[3]}",
-            "",
-            "# per-atom potential energy",
-            f"compute {self.compute_id} all pe/atom",
-            "",
-            f"# dump every {self.dump_every} steps: coords, forces, velocities, AND per-atom energy",
-            f"dump 1 all custom {self.dump_every} {self.dump_filename} "
-            f"id type xsu ysu zsu fx fy fz vx vy vz c_{self.compute_id}",
-            (
-                'dump_modify 1 sort id format line '
-                '"%d %d %20.15g %20.15g %20.15g %20.15g '
-                '%20.15g %20.15g %20.15g %20.15g %20.15g %20.15g"'
-            ),
-            "",
-            "# global thermo output to log",
-            "thermo_style custom " + " ".join(self.thermo_style_fields),
-            f"thermo_modify format float {self.thermo_format}",
-            f"thermo {self.thermo_every}",
-            "",
-            f"min_style   {self.min_style}",
-            (
-                "minimize    "
-                f"{self.etol} {self.ftol} "
-                f"{self.maxiter} {self.maxeval}"
-            ),
-        ]
-        return textwrap.dedent("\n".join(lines))
-
-    def __str__(self) -> str:
-        return self.generate()
+from pyiron_snippets import logger
     
 @pwf.as_function_node("working_directory")
 def write_LammpsStructure(structure,
@@ -117,7 +27,7 @@ def write_LammpsStructure(structure,
 
 @pwf.as_function_node("filepath")
 def write_LammpsInput(
-    lmp_input: LammpsInput,
+    lammps_input: str,
     filename: str,
     working_directory: str | None = None
 ) -> str:
@@ -126,9 +36,9 @@ def write_LammpsInput(
 
     Parameters
     ----------
-    lmp_input
+    lammps_input
         An instance of LammpsInput (your dataclass) containing all settings.
-        If `lmp_input.raw_script` is set, that script is written verbatim.
+        If `lammps_input.raw_script` is set, that script is written verbatim.
     filename
         Name of the file to write (e.g. "in.lammps").
     working_directory
@@ -140,7 +50,7 @@ def write_LammpsInput(
     filepath : str
         The full path to the file that was written.
     """
-    script = str(lmp_input)
+    script = str(lammps_input)
 
     if working_directory is not None:
         os.makedirs(working_directory, exist_ok=True)
@@ -153,51 +63,77 @@ def write_LammpsInput(
 
     return path
 
+from pyiron_lammps import parse_lammps_output_files
+from ase.io.lammpsdata import read_lammps_data
+from ase.io import read
 @pwf.as_function_node("lammps_output")
-def parse_LammpsOutput(
-    working_directory: str = os.getcwd(),
-    structure: Atoms | None = None,
-    potential_elements: List[str] | None = None,
-    units: str = "metal",
-    function: Callable[..., Any] | None = None,
-    parser_args: dict[str, Any] = {}
-) -> Any:
-    # Filter out the LAMMPS unit conversion warning
-    warnings.filterwarnings("ignore", message=".*Couldn't determine the LAMMPS to pyiron unit conversion type of quantity eng.*")
-    """
-    Parse LAMMPS output files in the working directory.
-
-    Args:
-        working_directory (str): Path to the directory containing LAMMPS outputs.
-        structure (ase.Atoms, optional): The input structure used in the run.
-        potential_elements (list[str], optional): List of element symbols in the potential.
-        units (str, optional): Units style used in the run (default "metal").
-        function (callable, optional): Custom parser function. Must accept the same
-            keyword arguments as parse_lammps_output_files.
-        parser_args (dict, optional): If `function` is provided, these args will
-            be passed to it. Ignored if `function` is None.
-
-    Returns:
-        Whatever the parser returns (typically a dict of output data).
-    """
-    if function is None:
-        # use the built-in parser
-        from pyiron_lammps import parse_lammps_output_files
-        # print(f"workdir in {working_directory}")
-        parse_fn = parse_lammps_output_files
-        parser_args = {
-            "working_directory": working_directory,
-            "structure": structure,
-            "potential_elements": potential_elements,
-            "units": units,
-            "dump_h5_file_name": "dump.h5",
-            "dump_out_file_name": "dump.out",
-            "log_lammps_file_name": "minimize.log",
-        }
+def parse_LammpsOutput(working_directory: str,
+                       potential_elements: List[str],
+                       units: str,
+                       prism: Optional[List[List[float]]] = None,
+                       lammps_structure_filepath: str = "lammps.data",
+                       dump_out_file_name: str = "dump.out",
+                       log_lammps_file_name: str = "log.lammps",
+                       log_lammps_convergence_printout: str = "Total wall time:",
+                       _parser_fn = None,
+                       _parser_fn_kwargs = None):
+    from pyiron_workflow_atomistics.dataclass_storage import EngineOutput
+    if _parser_fn is None:
+        try:
+            lammps_EngineOutput = read_lammps_data(os.path.join(working_directory, lammps_structure_filepath))
+            print("Successfully read LAMMPS structure file")
+        except Exception as e:
+            raise Exception(f"Error parsing LAMMPS output: {e}, you must provide a parser function (_parser_fn) and kwargs (_parser_fn_kwargs) if you want to use a custom parser.")
+        
+        lammps_EngineOutput = EngineOutput()
+        pyiron_lammps_output = parse_lammps_output_files(working_directory = working_directory,
+                                structure = read_lammps_data(os.path.join(working_directory, lammps_structure_filepath)),
+                                potential_elements = potential_elements,
+                                units = units,
+                                prism = prism,
+                                dump_out_file_name = dump_out_file_name,
+                                log_lammps_file_name = log_lammps_file_name)
+        # print(os.path.join(working_directory, lammps_structure_filepath))
+        # print(os.path.join(working_directory, dump_out_file_name))
+        species_lists = get_structure_species_lists(lammps_data_filepath = os.path.join(working_directory, lammps_structure_filepath),
+                                                    lammps_dump_filepath = os.path.join(working_directory, dump_out_file_name))
+        # print(lammps_node_output["generic"]["cells"], len(lammps_node_output["generic"]["cells"]))
+        atoms_list = []
+        for i in range(len(pyiron_lammps_output["generic"]["cells"])):
+            atoms = arrays_to_ase_atoms(
+                                        cells = pyiron_lammps_output["generic"]["cells"][i],
+                                        positions = pyiron_lammps_output["generic"]["positions"][i],
+                                        indices = pyiron_lammps_output["generic"]["indices"][i],
+                                        species_lists = species_lists
+                                    )
+            atoms_list.append(atoms)
+        lammps_EngineOutput.final_structure = atoms_list[-1]
+        from pyiron_workflow_lammps.generic import isLineInFile
+        if isLineInFile.node_function(filepath = os.path.join(working_directory, log_lammps_file_name),
+                                    line = log_lammps_convergence_printout,
+                                    exact_match = False):
+            # print(os.path.join(working_directory, lammps_log_filepath), convergence_printout)
+            converged = True
+        else:
+            converged = False
+        lammps_EngineOutput.final_results = pyiron_lammps_output
+        lammps_EngineOutput.convergence = converged
+        lammps_EngineOutput.final_energy = pyiron_lammps_output["generic"]["energy_tot"][-1]
+        lammps_EngineOutput.final_forces = pyiron_lammps_output["generic"]["forces"][-1]
+        lammps_EngineOutput.final_stress = pyiron_lammps_output["generic"]["pressures"][-1]
+        lammps_EngineOutput.final_volume = atoms.get_volume()
+        lammps_EngineOutput.energies = pyiron_lammps_output["generic"]["energy_tot"]
+        lammps_EngineOutput.forces = pyiron_lammps_output["generic"]["forces"]
+        lammps_EngineOutput.stresses = pyiron_lammps_output["generic"]["pressures"]
+        lammps_EngineOutput.structures = atoms_list
+        lammps_EngineOutput.n_ionic_steps = pyiron_lammps_output["generic"]["steps"]
     else:
-        parse_fn = function
-
-    return parse_fn(**parser_args)
+        try:
+            lammps_EngineOutput = _parser_fn(**_parser_fn_kwargs)
+        except Exception as e:
+            raise Exception(f"Error parsing LAMMPS output: {e}, you must provide a parser function (_parser_fn) and kwargs (_parser_fn_kwargs) if you want to use a custom parser.")
+            
+    return lammps_EngineOutput
 
 def get_structure_species_lists(lammps_data_filepath = "lammps.data",
                                lammps_dump_filepath = "dump.out"):
@@ -208,6 +144,7 @@ def get_structure_species_lists(lammps_data_filepath = "lammps.data",
     species_map = get_species_map(lammps_data_filepath)
     from pymatgen.io.lammps.outputs import parse_lammps_dumps
     species_lists = []
+    print(f"Get structure species lists operating in {lammps_dump_filepath}")
     for dump in parse_lammps_dumps(lammps_dump_filepath):
         species_lists.append([species_map[idx] for idx in dump.data.type])
     return species_lists
@@ -236,17 +173,41 @@ def get_species_map(lammps_data_filepath = "lammps.data"):
             species_map[idx] = symbol
     return species_map
 
+def arrays_to_ase_atoms(
+    cells:      np.ndarray,        # (n_frames, 3, 3)
+    positions:  np.ndarray,        # (n_frames, n_atoms, 3)
+    indices:    np.ndarray,        # (n_frames, n_atoms)
+    species_lists: list[list[str]],   # e.g. {0:'Fe',1:'C'} or {1:'Fe',2:'C'}
+    pbc:        bool = True,
+) -> Atoms:
+    """
+    Convert the final frame of LAMMPS‐style arrays into an ASE Atoms.
+
+    Raises KeyError if any type in `indices` isn't a key in `species_map`.
+    """
+    # last frame
+    cell  = cells
+    pos   = positions
+    types = indices
+
+    return Atoms(symbols=species_lists[-1], positions=pos, cell=cell, pbc=pbc)
+
 @pwf.as_macro_node("lammps_output")
 def lammps_job(
     self,
     working_directory: str,
     structure: Atoms,
-    lmp_input: LammpsInput,
+    lammps_input: str,
+    units: str,
     potential_elements: List[str],
+    lammps_structure_filepath: str = "lammps.data",
     input_filename: str = "in.lmp",
-    command: str = "mpirun -np 40 --bind-to none /cmmc/ptmp/hmai/LAMMPS/lammps_grace/build/lmp -in in.lmp -log minimize.log",
-    lammps_parser_function: Callable[..., Any] | None = None,
-    lammps_parser_args: dict[str, Any] = {},
+    dump_out_file_name: str = "dump.out",
+    command: str = "mpirun -np 40 --bind-to none /cmmc/ptmp/hmai/LAMMPS/lammps_grace/build/lmp -in in.lmp -log log.lammps",
+    lammps_log_filepath: str = "log.lammps",
+    lammps_log_convergence_printout: str = "Total wall time:",
+    _lammps_parser_function: Callable[..., Any] | None = None,
+    _lammps_parser_args: dict[str, Any] = {},
 ):
     """
     Run a LAMMPS calculation end-to-end:
@@ -259,7 +220,7 @@ def lammps_job(
     Args:
         working_directory: Path to the working directory.
         structure: ASE Atoms object to simulate.
-        lmp_input: LammpsInput dataclass with all run settings.
+        lammps_input: str representation of the lammps input script.
         potential_elements: List of element symbols in the potential.
         input_filename: Name of the input script (default "in.lmp").
         command: Full MPI/launcher command to run LAMMPS.
@@ -276,14 +237,14 @@ def lammps_job(
     self.structure_writer = write_LammpsStructure(
         structure=structure,
         potential_elements=potential_elements,
-        units=lmp_input.units,
-        file_name=lmp_input.read_data_file,
+        units=units,
+        file_name=lammps_structure_filepath,
         working_directory=working_directory
     )
 
     # 3) Write the input script
     self.input_writer = write_LammpsInput(
-        lmp_input=lmp_input,
+        lammps_input=lammps_input,
         filename=input_filename,
         working_directory=working_directory
     )
@@ -295,11 +256,15 @@ def lammps_job(
     # 5) Parse output (using custom or default parser)
     self.lammps_output = parse_LammpsOutput(
         working_directory=working_directory,
-        structure=structure,
         potential_elements=potential_elements,
-        units=lmp_input.units,
-        function=lammps_parser_function,
-        parser_args=lammps_parser_args
+        units=units,
+        prism=None,
+        lammps_structure_filepath=lammps_structure_filepath,
+        dump_out_file_name=dump_out_file_name,
+        log_lammps_file_name=lammps_log_filepath,
+        log_lammps_convergence_printout=lammps_log_convergence_printout,
+        _parser_fn=_lammps_parser_function,
+        _parser_fn_kwargs=_lammps_parser_args
     )
 
     # Wire up the flow
@@ -315,3 +280,32 @@ def lammps_job(
     self.starting_nodes = [self.working_dir]
 
     return self.lammps_output
+
+def lammps_calculator_fn(
+    working_directory: str,
+    structure: Atoms,
+    lammps_input: str,
+    units: str,
+    potential_elements: List[str],
+    input_filename: str = "in.lmp",
+    command: str = "mpirun -np 40 --bind-to none /cmcm/ptmp/hmai/LAMMPS/lammps_grace/build/lmp -in in.lmp -log minimize.log",
+    lammps_log_filepath: str = "log.lammps",
+    lammps_log_convergence_printout: str = "Total wall time:",
+    _lammps_parser_function: Callable[..., Any] | None = None,
+    _lammps_parser_args: dict[str, Any] = {},
+):
+    print(potential_elements)
+    output = lammps_job(
+        working_directory=working_directory,
+        structure=structure,
+        lammps_input=lammps_input,
+        units=units,
+        potential_elements=potential_elements,
+        input_filename=input_filename,
+        command=command,
+        lammps_log_filepath=lammps_log_filepath,
+        lammps_log_convergence_printout=lammps_log_convergence_printout,
+        _lammps_parser_function=_lammps_parser_function,
+        _lammps_parser_args=_lammps_parser_args
+    )()
+    return output
